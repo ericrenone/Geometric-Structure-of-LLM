@@ -8,8 +8,6 @@ This repository examines geometric properties of token and attention representat
 
 All computations are performed in the Poincaré ball model.
 
-**Features
-
 - Embeds a semantic hierarchy into hyperbolic space  
 - Constructs a distance-induced graph with curvature proxy  
 - Aligns perturbed copies of the embeddings via Wasserstein barycenter  
