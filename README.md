@@ -8,8 +8,6 @@ This repository examines geometric properties of token and attention representat
 
 All computations are performed in the Poincaré ball model.
 
-## geometric_llm_geometry.py
-
 Single-file script that:
 
 - Embeds a semantic hierarchy into hyperbolic space  
