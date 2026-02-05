@@ -1,199 +1,121 @@
-# geometric_llm_geometry.py
-"""
-Geometric Structure in Language Model Representations
-
-Illustrates three interconnected geometric concepts:
-• Hyperbolic embeddings of semantic hierarchies
-• Curvature-aware analysis of attention-like graphs
-• Alignment of distributed representations via optimal transport
-
-All operations are performed in the Poincaré ball model.
-
-Requirements
-------------
-pip install torch geoopt POT networkx matplotlib numpy
-"""
-
-import torch
-import geoopt
 import numpy as np
 import networkx as nx
-import ot
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
 from matplotlib import cm
 
 # ────────────────────────────────────────────────
-# Configuration & Reproducibility
+# 1. Hyperbolic Geometry Engine (NumPy Only)
 # ────────────────────────────────────────────────
-torch.manual_seed(42)
-np.random.seed(42)
+def poincare_dist(x, y):
+    """Calculates hyperbolic distance in the Poincaré disk (c=1)."""
+    sq_dist = np.sum((x - y)**2)
+    x_norm_sq = np.sum(x**2)
+    y_norm_sq = np.sum(y**2)
+    # Clamp values to avoid precision errors near the boundary (1.0)
+    eps = 1e-7
+    factor = 1 + 2 * sq_dist / (max(eps, 1 - x_norm_sq) * max(eps, 1 - y_norm_sq))
+    return np.acosh(max(1.0, factor))
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Running on device: {device}\n")
+def expmap0(v):
+    """Projects Euclidean vectors into the Poincaré ball via the Exponential Map."""
+    v_norm = np.linalg.norm(v, axis=-1, keepdims=True)
+    v_norm = np.maximum(v_norm, 1e-15)
+    return np.tanh(v_norm) * v / v_norm
 
 # ────────────────────────────────────────────────
-# Semantic hierarchy (WordNet-inspired subtree)
+# 2. Data Structure & Hierarchy Logic
 # ────────────────────────────────────────────────
 hierarchy = [
-    (0,  "entity",         []),
-    (1,  "living_thing",   [0]),
-    (2,  "non_living",     [0]),
-    (3,  "animal",         [1]),
-    (4,  "plant",          [1]),
-    (5,  "mammal",         [3]),
-    (6,  "bird",           [3]),
-    (7,  "fish",           [3]),
-    (8,  "tree",           [4]),
-    (9,  "flower",         [4]),
-    (10, "dog",            [5]),
-    (11, "cat",            [5]),
-    (12, "eagle",          [6]),
-    (13, "sparrow",        [6]),
-    (14, "salmon",         [7]),
-    (15, "oak",            [8]),
-    (16, "rose",           [9]),
+    (0, "entity", []), (1, "living_thing", [0]), (2, "non_living", [0]),
+    (3, "animal", [1]), (4, "plant", [1]), (5, "mammal", [3]),
+    (6, "bird", [3]), (7, "fish", [3]), (8, "tree", [4]),
+    (9, "flower", [4]), (10, "dog", [5]), (11, "cat", [5]),
+    (12, "eagle", [6]), (13, "sparrow", [6]), (14, "salmon", [7]),
+    (15, "oak", [8]), (16, "rose", [9])
 ]
 
 tokens = [node[1] for node in hierarchy]
 n_tokens = len(tokens)
-parent_map = {child: parent for _, _, parents in hierarchy for child in parents}
+# Fixed mapping: child -> parent
+parent_map = {node_id: p_list[0] for node_id, _, p_list in hierarchy if p_list}
 
 # ────────────────────────────────────────────────
-# 1. Hyperbolic embeddings (Poincaré ball)
+# 3. Layout & Graph Generation
 # ────────────────────────────────────────────────
-manifold = geoopt.PoincareBall(c=1.0)
-
-def radial_tree_layout(root=0, max_radius=1.0):
+def radial_tree_layout(max_radius=2.5):
+    """Generates an initial Euclidean layout for the hierarchy."""
     coords = np.zeros((n_tokens, 2))
     def recurse(node_id, depth=0, angle=0.0, angle_span=2 * np.pi):
-        r = depth * max_radius / 5.0
-        coords[node_id] = r * np.array([np.cos(angle), np.sin(angle)])
+        r = depth * (max_radius / 5.0)
+        coords[node_id] = [r * np.cos(angle), r * np.sin(angle)]
         children = [c for c, p in parent_map.items() if p == node_id]
         if children:
             sub_span = angle_span / len(children)
             for i, child in enumerate(children):
-                sub_angle = angle - angle_span / 2 + (i + 0.5) * sub_span
+                sub_angle = angle - angle_span/2 + (i + 0.5) * sub_span
                 recurse(child, depth + 1, sub_angle, sub_span)
-    recurse(root)
+    recurse(0)
     return coords
 
-euc_layout = radial_tree_layout() * 0.18
-euc_tensor = torch.from_numpy(euc_layout).float().to(device)
-hyp_embeddings = manifold.expmap0(euc_tensor)
-
-# ────────────────────────────────────────────────
-# 2. Attention-like graph & curvature proxy
-# ────────────────────────────────────────────────
+# Build the Graph for NetworkX analysis
 G = nx.Graph()
 for i, token in enumerate(tokens):
-    G.add_node(i, token=token, pos=hyp_embeddings[i].cpu().numpy())
+    G.add_node(i, label=token)
+for child, parent in parent_map.items():
+    G.add_edge(parent, child)
 
-# Edges weighted by inverse hyperbolic distance
-distance_threshold = 0.85
-for i in range(n_tokens):
-    for j in range(i + 1, n_tokens):
-        dist = manifold.dist(
-            hyp_embeddings[i:i+1],
-            hyp_embeddings[j:j+1]
-        ).item()
-        if dist < distance_threshold:
-            weight = max(0.02, 1.0 / (dist + 0.005))
-            G.add_edge(i, j, weight=weight)
-
-# Curvature proxy (higher values indicate regions of higher positive curvature / mixing)
-weighted_degree = nx.degree(G, weight="weight")
-weighted_clustering = nx.clustering(G, weight="weight")
-avg_neighbor_weight = {
-    u: np.mean([G[u][v]["weight"] for v in G.neighbors(u)]) if G.degree(u) > 0 else 0.01
-    for u in G
-}
-
-curvature_proxy = {
-    u: weighted_degree[u] * (1 + weighted_clustering[u]) / (avg_neighbor_weight[u] + 0.005)
-    for u in G.nodes()
-}
+# Compute Curvature Proxy (Degree * Clustering)
+# High values = 'dense' semantic regions; Low values = 'leaf' nodes
+clustering = nx.clustering(G)
+node_colors = [ (G.degree(i) * (1 + clustering[i])) for i in G.nodes()]
 
 # ────────────────────────────────────────────────
-# Visualization: attention graph with curvature proxy
+# 4. Real-Time Animated Visualization
 # ────────────────────────────────────────────────
-pos = {i: G.nodes[i]["pos"] for i in G}
-node_colors = [curvature_proxy[i] for i in G.nodes()]
-labels = {i: tokens[i] for i in G.nodes()}
+fig, ax = plt.subplots(figsize=(10, 10), facecolor='#111111')
+plt.subplots_adjust(left=0, right=1, top=0.9, bottom=0)
 
-fig, ax = plt.subplots(figsize=(12, 9))
-nx.draw_networkx_edges(G, pos, alpha=0.4, edge_color="lightgray", ax=ax)
-sc = nx.draw_networkx_nodes(
-    G, pos,
-    node_color=node_colors,
-    cmap=cm.viridis_r,
-    node_size=1000,
-    edgecolors="black",
-    ax=ax
-)
-nx.draw_networkx_labels(G, pos, labels, font_size=9, font_weight="bold", ax=ax)
-plt.colorbar(sc, ax=ax, label="Curvature proxy")
-ax.set_title("Graph induced by hyperbolic distances\n(node color = curvature proxy)")
-ax.axis("equal")
-plt.tight_layout()
+euc_base = radial_tree_layout()
+boundary_circle = plt.Circle((0, 0), 1, color='#333333', fill=True, zorder=0)
+ax.add_artist(boundary_circle)
+ax.set_xlim(-1.1, 1.1)
+ax.set_ylim(-1.1, 1.1)
+ax.set_aspect('equal')
+ax.axis('off')
+
+# Plot elements
+edges_plot = [ax.plot([], [], color='cyan', alpha=0.4, lw=1, zorder=1)[0] for _ in G.edges()]
+scatter = ax.scatter([], [], c=[], cmap=cm.plasma, s=200, edgecolors='white', zorder=2)
+texts = [ax.text(0, 0, tokens[i], color='white', fontsize=9, fontweight='bold', 
+                 ha='center', va='center', alpha=0) for i in range(n_tokens)]
+
+title = ax.set_title("Hyperbolic Semantic Projection", color='white', fontsize=16, pad=20)
+
+def update(frame):
+    # Transition from origin to full hyperbolic expansion
+    scale = min(1.0, frame / 50.0)
+    current_hyp = expmap0(euc_base * scale)
+    
+    # Update Nodes
+    scatter.set_offsets(current_hyp)
+    scatter.set_array(np.array(node_colors))
+    
+    # Update Edges
+    for idx, (u, v) in enumerate(G.edges()):
+        x_pts = [current_hyp[u, 0], current_hyp[v, 0]]
+        y_pts = [current_hyp[u, 1], current_hyp[v, 1]]
+        edges_plot[idx].set_data(x_pts, y_pts)
+    
+    # Update Labels (with fade-in)
+    for i, t in enumerate(texts):
+        t.set_position((current_hyp[i, 0], current_hyp[i, 1] + 0.06))
+        t.set_alpha(scale)
+        
+    return scatter, *edges_plot, *texts
+
+# Run Animation
+ani = FuncAnimation(fig, update, frames=100, interval=30, blit=True, repeat=True)
+
+print("Displaying real-time hyperbolic expansion...")
 plt.show()
-
-# ────────────────────────────────────────────────
-# 3. Distributed alignment via Wasserstein barycenter
-# ────────────────────────────────────────────────
-local_A = hyp_embeddings + torch.randn_like(hyp_embeddings) * 0.08
-local_B = hyp_embeddings + torch.randn_like(hyp_embeddings) * 0.12
-
-cloud_A = local_A.cpu().numpy()
-cloud_B = local_B.cpu().numpy()
-uniform_weights = np.ones(n_tokens) / n_tokens
-
-# Hyperbolic cost matrix
-cost_matrix = np.zeros((n_tokens, n_tokens))
-for i in range(n_tokens):
-    for j in range(n_tokens):
-        cost_matrix[i, j] = manifold.dist(
-            torch.from_numpy(cloud_A[i:i+1]).float().to(device),
-            torch.from_numpy(cloud_B[j:j+1]).float().to(device)
-        ).item()
-
-# Compute barycenter
-barycenter = ot.barycenter(
-    [cloud_A, cloud_B],
-    [0.5, 0.5],
-    M=cost_matrix,
-    weights=[uniform_weights, uniform_weights],
-    method="sinkhorn",
-    numItermax=12000
-)
-
-# ────────────────────────────────────────────────
-# Visualization: original vs aligned embeddings
-# ────────────────────────────────────────────────
-fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-axes[0].scatter(
-    hyp_embeddings[:, 0].cpu(),
-    hyp_embeddings[:, 1].cpu(),
-    c="navy", s=140, label="Reference hierarchy"
-)
-axes[0].set_title("Original embeddings")
-axes[0].axis("equal")
-axes[0].grid(alpha=0.15)
-
-axes[1].scatter(
-    barycenter[:, 0],
-    barycenter[:, 1],
-    c="maroon", s=140, label="Aligned representation"
-)
-axes[1].set_title("Aligned representation (Wasserstein barycenter)")
-axes[1].axis("equal")
-axes[1].grid(alpha=0.15)
-
-for ax in axes:
-    ax.set_xlabel("Coordinate 1")
-    ax.set_ylabel("Coordinate 2")
-
-plt.suptitle("Alignment of distributed representations in hyperbolic space")
-plt.tight_layout()
-plt.show()
-
-print("Execution complete.")
